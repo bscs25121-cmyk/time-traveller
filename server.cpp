@@ -49,34 +49,52 @@ public:
     void push(const T& val)
     {
         Node* newnode = new newnode{ val,top };
-
+        top = newnode;
+        count++;
         // pushes the value on the stack if max limit is not reached yet.
     }
     T pop()
     {
-       while // pop the top value on the stack
+        if (isEmpty)
+        {
+            cout << "it is already empty";
+            break;
+        }
+        Node* temp = top;
+        top = top->next;
+        delete temp;
+
+        // pop the top value on the stack
     }
     T& peek()
     {
-        // returns the top value on the stack
+        return top;// returns the top value on the stack
     }
     bool isEmpty()
     {
+        if (count == 0)
+        {
+            return true;
+        }
+        else false;
     }
     int32_t depth()
     {
+        return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
-        // copies every frame, top to bottom in the array given as a parameter
-        // this is what buildSnapshot() call, returns count written
+        int32_t write = 0;
+        Node* curr = top;
+        if (// copies every frame, top to bottom in the array given as a parameter
+            // this is what buildSnapshot() call, returns count written
     }
 };
 
 
 // Timeline : doubly linked list of Snapshots
 struct Snapshot; // fwd declaration;
-struct TimelineNode
+    struct TimelineNode
 {
     Snapshot* data;
     TimelineNode* next;
@@ -90,18 +108,15 @@ class Timeline
 public:
     // Implement these functions
     Timeline()
-    {
-    }
+    {}
     void record(Snapshot* s)
     {
         // add record in the timeline
     }
     TimelineNode* begin()
-    {
-    }
+    {}
     int32_t getStepCount()
-    {
-    }
+    {}
 };
 
 // Core structs
