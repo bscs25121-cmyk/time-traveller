@@ -7,6 +7,7 @@
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
 #include <iostream>
+#include<sstream>
 #include <string>
 #include <cstdint>
 #include <fstream>
@@ -85,16 +86,21 @@ public:
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
         int32_t write = 0;
+
         Node* curr = top;
-        if (// copies every frame, top to bottom in the array given as a parameter
-            // this is what buildSnapshot() call, returns count written
+        int32_t written = 0;
+        while (curr != nullptr && written < maxLen)
+        {
+            out[written++] = curr->data;
+            curr = curr->next;
+        }
+        return written;
     }
+
 };
-
-
 // Timeline : doubly linked list of Snapshots
 struct Snapshot; // fwd declaration;
-    struct TimelineNode
+struct TimelineNode
 {
     Snapshot* data;
     TimelineNode* next;
@@ -108,17 +114,25 @@ class Timeline
 public:
     // Implement these functions
     Timeline()
-    {}
+    {
+        head = nullptr;
+        tail = nullptr;
+        stepCount = 0;
+
+    }
     void record(Snapshot* s)
     {
-        // add record in the timeline
+        TimelineNode* node = new TimelineNode{ s,nullptr,tail };// add record in the timeline
     }
     TimelineNode* begin()
-    {}
+    {
+        return head;
+    }
     int32_t getStepCount()
-    {}
+    {
+        return stepCount;
+    }
 };
-
 // Core structs
 struct Variable
 {
@@ -148,9 +162,12 @@ struct TTDBHeader
 };
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
+
+    fseek(f, 0, SEEK_SET);
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
-
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
     // placeholder for other two data members
 }
 
@@ -166,8 +183,6 @@ struct PendingPatch
     string targetFuncName;
 };
 
-
-
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
@@ -175,17 +190,34 @@ bool readSourceLine(ifstream& in, string& out)
 }
 string firstWord(const string& line)
 {
-    // returns first word from the input string
+    const char* p = line.c_str();
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    string word = "";
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+    {
+        word += *p;
+        p++;
+    }
+    return word;
 }
 string secondWord(const string& line)
 {
-    // returns the second word
+    const char* p = line.c_str();
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    string word = "";
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+    {
+        word += *p;
+        p++;
+    }
+    return word;
 }
 bool validateProgram(const char* sourcePath)
 {
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
-
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
@@ -226,13 +258,30 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
+    const char* p = line.c_str();
+    int32_t count = 0;
+    while (*p != '\0' && count < maxTokens)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == '\0') break;
+        string word = "";
+        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+        {
+            word += *p;
+            p++;
+        }
+        if (count == 0)
+            tokens[count++] = Token{ KEYWORD, word };
+        else if (count == 1)
+            tokens[count++] = Token{ IDENTIFIER, word };
+        else
+            tokens[count++] = Token{ PARAM, word };
+    }
+    return count;
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
+    Snapshot* s = new Snapshot();
     // build the snapshot based on the callStack given
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
