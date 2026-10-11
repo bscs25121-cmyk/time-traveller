@@ -282,27 +282,136 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     Snapshot* s = new Snapshot();
-    // build the snapshot based on the callStack given
+    s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
+    return s;
 }
+
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
-    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
+    if (mainOffset < 0) return;
+    FILE* f = fopen(resolveBinPath, "rb");
+    if (!f) return;
 
-    // implementation:
-    // execute line by line, and according to the keyword perform action
+    Stack<Frame> callStack;
+    Frame mainFrame{ "main", 0, {}, -1, {}, 0 };
+    callStack.push(mainFrame);
+    fseek(f, mainOffset, SEEK_SET);
+
+    Token tokens[MAX_TOKENS];
+    string lineText;
+
+    while (!callStack.isEmpty())
+    {
+        int64_t currentOffset = ftell(f);
+        int64_t patchOffset = readResolveRecord(f, lineText);
+        if (lineText.empty()) break;
+
+        int32_t tokenCount = tokenizeLine(lineText, tokens, MAX_TOKENS);
+        if (tokenCount == 0) continue;
+
+        string kw = tokens[0].text;
+        Frame& currFrame = callStack.peek();
+
+        if (kw == "func")
+        {
+            for (int i = 2; i < tokenCount && currFrame.localCount < MAX_VARS_PER_FRAME; i++)
+                currFrame.locals[currFrame.localCount++] = Variable{ tokens[i].text, currFrame.argv[i - 2].value };
+        }
+        else if (kw == "set")
+        {
+            if (tokenCount >= 3) setVariableVal(currFrame, tokens[1].text, getVariableVal(currFrame, tokens[2].text));
+        }
+        else if (kw == "add" || kw == "sub" || kw == "mul" || kw == "div")
+        {
+            if (tokenCount >= 3)
+            {
+                int32_t val1 = getVariableVal(currFrame, tokens[1].text);
+                int32_t val2 = getVariableVal(currFrame, tokens[2].text);
+                int32_t res = 0;
+                if (kw == "add") res = val1 + val2;
+                else if (kw == "sub") res = val1 - val2;
+                else if (kw == "mul") res = val1 * val2;
+                else if (kw == "div") res = (val2 != 0) ? (val1 / val2) : 0;
+                setVariableVal(currFrame, tokens[1].text, res);
+            }
+        }
+        else if (kw == "call")
+        {
+            Frame newFrame{ tokens[1].text, 0, {}, (int32_t)ftell(f), {}, 0 };
+            for (int i = 2; i < tokenCount && newFrame.argc < MAX_VARS_PER_FRAME; i++)
+                newFrame.argv[newFrame.argc++] = Variable{ tokens[i].text, getVariableVal(currFrame, tokens[i].text) };
+            callStack.push(newFrame);
+            fseek(f, patchOffset, SEEK_SET);
+        }
+        else if (kw == "func_end")
+        {
+            int64_t returnPos = currFrame.returnLine;
+            callStack.pop();
+            if (returnPos != -1) fseek(f, returnPos, SEEK_SET);
+        }
+
+        if (!callStack.isEmpty()) timeline.record(buildSnapshot(callStack));
+    }
+    fclose(f);
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    FILE* f = fopen(tdbgPath, "wb");
+    if (!f) return;
+
+    TTDBHeader header{ "TTDB", 1, timeline.getStepCount(), 0 };
+    fwrite(&header, sizeof(TTDBHeader), 1, f);
+
+    int32_t stepCount = timeline.getStepCount();
+    int64_t* indexArray = new int64_t[stepCount];
+    TimelineNode* curr = timeline.begin();
+    int32_t idx = 0;
+
+    while (curr != nullptr)
+    {
+        indexArray[idx++] = ftell(f);
+        Snapshot* s = curr->data;
+
+        fwrite(&s->stackDepth, sizeof(int32_t), 1, f);
+        for (int i = 0; i < s->stackDepth; i++)
+        {
+            Frame& fr = s->callStack[i];
+            int32_t nameLen = fr.func_name.size();
+            fwrite(&nameLen, sizeof(int32_t), 1, f);
+            fwrite(fr.func_name.c_str(), 1, nameLen, f);
+            fwrite(&fr.returnLine, sizeof(int32_t), 1, f);
+
+            fwrite(&fr.argc, sizeof(int32_t), 1, f);
+            for (int a = 0; a < fr.argc; a++)
+            {
+                int32_t vNameLen = fr.argv[a].name.size();
+                fwrite(&vNameLen, sizeof(int32_t), 1, f);
+                fwrite(fr.argv[a].name.c_str(), 1, vNameLen, f);
+                fwrite(&fr.argv[a].value, sizeof(int32_t), 1, f);
+            }
+
+            fwrite(&fr.localCount, sizeof(int32_t), 1, f);
+            for (int l = 0; l < fr.localCount; l++)
+            {
+                int32_t vNameLen = fr.locals[l].name.size();
+                fwrite(&vNameLen, sizeof(int32_t), 1, f);
+                fwrite(fr.locals[l].name.c_str(), 1, vNameLen, f);
+                fwrite(&fr.locals[l].value, sizeof(int32_t), 1, f);
+            }
+        }
+        curr = curr->next;
+    }
+
+    header.indexOffset = ftell(f);
+    fwrite(indexArray, sizeof(int64_t), stepCount, f);
+    writeHeader(f, header);
+
+    delete[] indexArray;
+    fclose(f);
 }
+
 // main section
 int32_t main()
 {
