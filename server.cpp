@@ -26,10 +26,6 @@ const int32_t MAX_PATCHES = MAX_FUNCS * 4;
 const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
 const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
 const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a dead client can't hang the server forever
-
-// ---- Custom data structures ----
-
-// Stack: back the live Call Stack during execution
 template <typename T>
 class Stack
 {
@@ -241,7 +237,6 @@ static bool isInteger(const string& s)
     }
     return true;
 }
-
 static int32_t getVariableVal(const Frame& frame, const string& token)
 {
     if (isInteger(token))
@@ -260,7 +255,6 @@ static int32_t getVariableVal(const Frame& frame, const string& token)
     }
     return 0;
 }
-
 static void setVariableVal(Frame& frame, const string& varName, int32_t val)
 {
     for (int i = 0; i < frame.localCount; i++)
@@ -350,7 +344,7 @@ bool validateProgram(const char* sourcePath)
             if (inFunc)
             {
                 in.close();
-                return false; // Rejects nested function declarations
+                return false; //kvfifsrkt
             }
             inFunc = true;
         }
@@ -369,7 +363,6 @@ bool validateProgram(const char* sourcePath)
     return !inFunc;
 }
 
-// PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
     int64_t pos = ftell(f);
@@ -447,7 +440,6 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     }
     in.close();
 
-    // Patch target jump offsets for calls
     for (int i = 0; i < patchCount; i++)
     {
         int64_t targetOffset = -1;
@@ -605,7 +597,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     }
     fclose(f);
 }
-// PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     FILE* f = fopen(tdbgPath, "wb");
