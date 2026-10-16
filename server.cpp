@@ -408,29 +408,64 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     while (readSourceLine(in, line))
     {
         string kw = firstWord(line);
-
         if (kw == "func")
         {
             string fname = secondWord(line);
             int64_t recordOffset = ftell(f);
-            if (funcCount < MAX_FUNCS)
+
+            if (fname.empty())
             {
-                funcArray[funcCount++] = FuncEntry{ fname, recordOffset };
+                cout << "Error: Missing function name." << endl;
+                fclose(f);
+                return -1;
             }
+
+            for (int i = 0; i < funcCount; i++)
+            {
+                if (funcArray[i].funcName == fname)
+                {
+                    cout << "Error: Duplicate function: " << fname << endl;
+                    fclose(f);
+                    return -1;
+                }
+            }
+
+            if (funcCount >= MAX_FUNCS)
+            {
+                cout << "Error: Too many functions." << endl;
+                fclose(f);
+                return -1;
+            }
+
+            funcArray[funcCount++] = FuncEntry{ fname, recordOffset };
+
             if (fname == "main")
             {
                 mainOffset = recordOffset;
             }
+
             writeResolveRecord(f, 0, line);
         }
         else if (kw == "call")
         {
             string targetFunc = secondWord(line);
             int64_t patchOffset = ftell(f);
-            if (patchCount < MAX_PATCHES)
+
+            if (targetFunc.empty())
             {
-                patches[patchCount++] = PendingPatch{ patchOffset, targetFunc };
+                cout << "Error: Missing call target." << endl;
+                fclose(f);
+                return -1;
             }
+
+            if (patchCount >= MAX_PATCHES)
+            {
+                cout << "Error: Too many function calls." << endl;
+                fclose(f);
+                return -1;
+            }
+            patches[patchCount++] = PendingPatch{ patchOffset, targetFunc };
+
             writeResolveRecord(f, 0, line);
         }
         else
@@ -507,16 +542,46 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
     s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
     return s;
 }
+bool canSetVariable(const Frame& frame, const string& name)
+{
+    for (int i = 0; i < frame.localCount; i++)
+    {
+        if (frame.locals[i].name == name)
+            return true;
+    }
+
+    for (int i = 0; i < frame.argc; i++)
+    {
+        if (frame.argv[i].name == name)
+            return true;
+    }
+
+    return frame.localCount < MAX_VARS_PER_FRAME;
+}
+
+bool executionFailed = false;
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
-    if (mainOffset < 0) return;
+    executionFailed = false;
+
+    if (mainOffset < 0)
+    {
+        executionFailed = true;
+        return;
+    }
+
     FILE* f = fopen(resolveBinPath, "rb");
-    if (!f) return;
+    if (!f)
+    {
+        executionFailed = true;
+        return;
+    }
+
     Stack<Frame> callStack;
     Frame mainFrame;
     mainFrame.func_name = "main";
     mainFrame.argc = 0;
-    mainFrame.returnLine = -1; 
+    mainFrame.returnLine = -1;
     mainFrame.localCount = 0;
     callStack.push(mainFrame);
     fseek(f, mainOffset, SEEK_SET);
@@ -526,27 +591,72 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
     while (!callStack.isEmpty())
     {
-        int64_t currentOffset = ftell(f);
+        lineText.clear();
         int64_t patchOffset = readResolveRecord(f, lineText);
-        if (lineText.empty()) break;
 
+        if (patchOffset < 0 || lineText.empty())
+        {
+            executionFailed = true;
+            break;
+        }
         int32_t tokenCount = tokenizeLine(lineText, tokens, MAX_TOKENS);
         if (tokenCount == 0) continue;
+
+        istringstream checkTokens(lineText);
+        string word;
+        int actualTokenCount = 0;
+
+        while (checkTokens >> word)
+        {
+            actualTokenCount++;
+        }
+
+        if (actualTokenCount > MAX_TOKENS)
+        {
+            cout << "Error: Too many tokens in instruction." << endl;
+            executionFailed = true;
+            break;
+        }
 
         string kw = tokens[0].text;
         Frame& currFrame = callStack.peek();
 
         if (kw == "func")
         {
-            for (int i = 2; i < tokenCount && currFrame.localCount < MAX_VARS_PER_FRAME; i++)
+            int32_t expectedArgs = tokenCount - 2;
+
+            if (expectedArgs != currFrame.argc)
             {
-                currFrame.locals[currFrame.localCount++] = Variable{ tokens[i].text, currFrame.argv[i - 2].value };
+                cout << "Error: Argument count mismatch in "
+                     << currFrame.func_name << endl;
+                executionFailed = true;
+                break;
+            }
+
+            if (expectedArgs > MAX_VARS_PER_FRAME)
+            {
+                cout << "Error: Too many parameters." << endl;
+                executionFailed = true;
+                break;
+            }
+
+            for (int i = 2; i < tokenCount; i++)
+            {
+                currFrame.locals[currFrame.localCount++] =
+                    Variable{tokens[i].text, currFrame.argv[i - 2].value};
             }
         }
         else if (kw == "set")
         {
             if (tokenCount >= 3)
             {
+                if (!canSetVariable(currFrame, tokens[1].text))
+                {
+                    cout << "Error: Too many local variables." << endl;
+                    executionFailed = true;
+                    break;
+                }
+
                 int32_t val = getVariableVal(currFrame, tokens[2].text);
                 setVariableVal(currFrame, tokens[1].text, val);
             }
@@ -558,45 +668,104 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 int32_t val1 = getVariableVal(currFrame, tokens[1].text);
                 int32_t val2 = getVariableVal(currFrame, tokens[2].text);
                 int32_t res = 0;
+
                 if (kw == "add") res = val1 + val2;
                 else if (kw == "sub") res = val1 - val2;
                 else if (kw == "mul") res = val1 * val2;
                 else if (kw == "div") res = (val2 != 0) ? (val1 / val2) : 0;
+
+                if (!canSetVariable(currFrame, tokens[1].text))
+                {
+                    cout << "Error: Too many local variables." << endl;
+                    executionFailed = true;
+                    break;
+                }
 
                 setVariableVal(currFrame, tokens[1].text, res);
             }
         }
         else if (kw == "call")
         {
+            if (tokenCount < 2)
+            {
+                cout << "Error: Missing function name." << endl;
+                executionFailed = true;
+                break;
+            }
+
+            if (callStack.depth() >= MAX_STACK_DEPTH)
+            {
+                cout << "Error: Maximum stack depth exceeded." << endl;
+                executionFailed = true;
+                break;
+            }
+
+            if (tokenCount - 2 > MAX_VARS_PER_FRAME)
+            {
+                cout << "Error: Too many arguments." << endl;
+                executionFailed = true;
+                break;
+            }
+
             Frame newFrame;
             newFrame.func_name = tokens[1].text;
             newFrame.argc = 0;
             newFrame.localCount = 0;
-            newFrame.returnLine = ftell(f); 
-            for (int i = 2; i < tokenCount && newFrame.argc < MAX_VARS_PER_FRAME; i++)
+            newFrame.returnLine = ftell(f);
+
+            for (int i = 2; i < tokenCount; i++)
             {
                 int32_t argVal = getVariableVal(currFrame, tokens[i].text);
-                newFrame.argv[newFrame.argc++] = Variable{ tokens[i].text, argVal };
+                newFrame.argv[newFrame.argc++] =
+                    Variable{tokens[i].text, argVal};
             }
+
             callStack.push(newFrame);
-            fseek(f, patchOffset, SEEK_SET); 
+            fseek(f, patchOffset, SEEK_SET);
         }
         else if (kw == "func_end")
         {
-            int64_t returnPos = currFrame.returnLine;
-            callStack.pop();
+            Frame finishedFrame = callStack.pop();
+            int64_t returnPos = finishedFrame.returnLine;
+
+            if (!callStack.isEmpty())
+            {
+                Frame& caller = callStack.peek();
+
+                for (int i = 0; i < finishedFrame.argc; i++)
+                {
+                    string callerVar = finishedFrame.argv[i].name;
+
+                    if (i < finishedFrame.localCount)
+                    {
+                        int32_t updatedValue = finishedFrame.locals[i].value;
+
+                        if (!canSetVariable(caller, callerVar))
+                        {
+                            cout << "Error: Too many caller variables." << endl;
+                            executionFailed = true;
+                            break;
+                        }
+
+                        setVariableVal(caller, callerVar, updatedValue);
+                    }
+                }
+            }
+
+            if (executionFailed) break;
+
             if (returnPos != -1)
             {
                 fseek(f, returnPos, SEEK_SET);
             }
         }
-        if (!callStack.isEmpty())
-        {
-            timeline.record(buildSnapshot(callStack));
-        }
+
+        timeline.record(buildSnapshot(callStack));
     }
+
     fclose(f);
 }
+
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     FILE* f = fopen(tdbgPath, "wb");
@@ -606,7 +775,7 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     header.version = 1;
     header.stepCount = timeline.getStepCount();
     header.indexOffset = 0;
-    fwrite(&header, sizeof(TTDBHeader), 1, f);
+    writeHeader(f, header);
     int32_t stepCount = timeline.getStepCount();
     int64_t* indexArray = new int64_t[stepCount];
     TimelineNode* curr = timeline.begin();
@@ -664,6 +833,12 @@ int32_t main()
     }
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
+
+    if (executionFailed)
+    {
+        cout << "Error: Execution failed." << endl;
+        return 1;
+    }
     writeTdbg(timeline, "session.tdbg");
     return 0;
 }
